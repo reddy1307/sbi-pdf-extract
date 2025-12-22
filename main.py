@@ -8,7 +8,6 @@ import os
 
 app = FastAPI(title="Bank Statement Parser API")
 
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -17,10 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-
 def extract_description(txn):
-   
     patterns = [
         r"/(?:CR|DR)/\d+/([^/]+)", 
         r"UPI/(?:CR|DR)/\d+/([^/]+)", 
@@ -30,11 +26,8 @@ def extract_description(txn):
     for pattern in patterns:
         match = re.search(pattern, txn, re.IGNORECASE)
         if match:
-          
             desc = match.group(1) if match.lastindex >= 1 else "Unknown"
-            
             if "UPI/" in desc:
-               
                 name_match = re.search(r"/([^/]+)$", desc)
                 if name_match:
                     return name_match.group(1).strip()
@@ -71,7 +64,6 @@ def categorize(desc, txn_type):
 def group_transactions(lines):
     transactions = []
     current = []
-    
     date_pattern = re.compile(r"^\d{2}\s+[A-Z]{3}\s+\d{4}")
 
     for line in lines:
@@ -88,65 +80,51 @@ def group_transactions(lines):
     return transactions
 
 def parse_transaction(txn):
-    
     txn = re.sub(r'\s+', ' ', txn.strip())
-    
-    
-    print(f"Parsing transaction: {txn}")
-    
     
     date_match = re.search(r"(\d{2}\s+[A-Z]{3}\s+\d{4})", txn)
     date = None
     if date_match:
         try:
-          
             date_str = date_match.group(1)
             date = pd.to_datetime(date_str, format="%d %b %Y")
         except Exception as e:
-            print(f"Error parsing date {date_match.group(1)}: {e}")
+            print(f"Error: {e}")
     
-   
     all_numbers = re.findall(r"\d+(?:,\d+)*(?:\.\d+)?", txn)
     nums = [float(x.replace(",", "")) for x in all_numbers]
     
-    
-  
     amount = 0.0
     txn_type = "UNKNOWN"
     
     if "TRANSFER TO" in txn.upper() or "/DR/" in txn.upper():
         txn_type = "DEBIT"
-        
         debit_match = re.search(r"TRANSFER TO\s+\d+\s+-\s+(\d+(?:,\d+)*(?:\.\d+)?)", txn)
         if debit_match:
             amount = float(debit_match.group(1).replace(",", ""))
         elif len(nums) >= 2:
-           
             if len(nums) == 2:
-                amount = nums[0]  
+                amount = nums[0]
             elif len(nums) >= 3:
-                
-                amount = nums[1]  
+                amount = nums[1]
                 
     elif "TRANSFER FROM" in txn.upper() or "/CR/" in txn.upper():
         txn_type = "CREDIT"
-        
         credit_match = re.search(r"TRANSFER FROM\s+\d+\s+-\s+-\s+(\d+(?:,\d+)*(?:\.\d+)?)", txn)
         if credit_match:
             amount = float(credit_match.group(1).replace(",", ""))
         elif len(nums) >= 2:
             if len(nums) == 2:
-                amount = nums[0]  
+                amount = nums[0]
             elif len(nums) >= 3:
-                amount = nums[1] 
+                amount = nums[1]
 
-    
     utr = None
     utr_patterns = [
-        r"(?:/CR/|/DR/)(\d{6,})",  
-        r"TRANSFER (?:FROM|TO)\s+(\d{10,})",  
-        r"\b(\d{12,})\b",  
-        r"Ref No[\.:]*\s*(\d{6,})"  
+        r"(?:/CR/|/DR/)(\d{6,})",
+        r"TRANSFER (?:FROM|TO)\s+(\d{10,})",
+        r"\b(\d{12,})\b",
+        r"Ref No[\.:]*\s*(\d{6,})"
     ]
     
     for pattern in utr_patterns:
@@ -155,28 +133,24 @@ def parse_transaction(txn):
             utr = match.group(1)
             break
     
-    
     desc = extract_description(txn)
-    
     
     result = {
         "amount": round(amount, 2),
         "type": txn_type,
-        "date": date.strftime("%d-%b-%Y") if date is not None else None,
+        "date": date.strftime("%Y-%m-%d") if date is not None else None,
         "description": desc,
         "category": categorize(desc, txn_type),
-        "utr": utr  
+        "utr": utr
     }
     
     return result
-
 
 @app.post("/upload")
 async def parse_pdf(
     file: UploadFile = File(...),
     password: str = Form(...)
 ):
-    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(await file.read())
         pdf_path = tmp.name
@@ -221,18 +195,14 @@ async def parse_pdf(
             break
         clean_lines.append(line)
 
-    
-   
     grouped = group_transactions(clean_lines)
-   
-   
+    
     result = []
     for txn in grouped:
         parsed = parse_transaction(txn)
-        if parsed["amount"] > 0:  
+        if parsed["amount"] > 0:
             result.append(parsed)
     
     os.unlink(pdf_path)
     
-   
     return result
