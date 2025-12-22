@@ -8,7 +8,7 @@ import os
 
 app = FastAPI(title="Bank Statement Parser API")
 
-# Enable CORS (important for frontend)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -17,13 +17,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------
-# Helpers
-# -------------------------
+
 
 def extract_description(txn):
-    match = re.search(r"/(?:CR|DR)/\d+/([^/]+)", txn, re.IGNORECASE)
-    return match.group(1).strip() if match else "Unknown"
+   
+    patterns = [
+        r"/(?:CR|DR)/\d+/([^/]+)", 
+        r"UPI/(?:CR|DR)/\d+/([^/]+)", 
+        r"TRANSFER (?:FROM|TO)\s+\d+\s+(UPI/(?:CR|DR)/\d+/([^/]+))" 
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, txn, re.IGNORECASE)
+        if match:
+          
+            desc = match.group(1) if match.lastindex >= 1 else "Unknown"
+            
+            if "UPI/" in desc:
+               
+                name_match = re.search(r"/([^/]+)$", desc)
+                if name_match:
+                    return name_match.group(1).strip()
+            return desc.strip()
+    
+    return "Unknown"
 
 def categorize(desc, txn_type):
     desc = desc.lower()
@@ -54,6 +71,7 @@ def categorize(desc, txn_type):
 def group_transactions(lines):
     transactions = []
     current = []
+    
     date_pattern = re.compile(r"^\d{2}\s+[A-Z]{3}\s+\d{4}")
 
     for line in lines:
@@ -70,48 +88,95 @@ def group_transactions(lines):
     return transactions
 
 def parse_transaction(txn):
-    # Date
+    
+    txn = re.sub(r'\s+', ' ', txn.strip())
+    
+    
+    print(f"Parsing transaction: {txn}")
+    
+    
     date_match = re.search(r"(\d{2}\s+[A-Z]{3}\s+\d{4})", txn)
-    date = pd.to_datetime(date_match.group(1), format="%d %b %Y") if date_match else None
-
-    # Numbers
-    nums = [float(x.replace(",", "")) for x in re.findall(r"\d+(?:,\d+)*(?:\.\d+)?", txn)]
-
+    date = None
+    if date_match:
+        try:
+          
+            date_str = date_match.group(1)
+            date = pd.to_datetime(date_str, format="%d %b %Y")
+        except Exception as e:
+            print(f"Error parsing date {date_match.group(1)}: {e}")
+    
+   
+    all_numbers = re.findall(r"\d+(?:,\d+)*(?:\.\d+)?", txn)
+    nums = [float(x.replace(",", "")) for x in all_numbers]
+    
+    
+  
     amount = 0.0
     txn_type = "UNKNOWN"
-
-    if "TRANSFER TO" in txn or "/DR/" in txn:
+    
+    if "TRANSFER TO" in txn.upper() or "/DR/" in txn.upper():
         txn_type = "DEBIT"
-        amount = nums[-2] if len(nums) >= 2 else 0.0
-    elif "TRANSFER FROM" in txn or "/CR/" in txn:
+        
+        debit_match = re.search(r"TRANSFER TO\s+\d+\s+-\s+(\d+(?:,\d+)*(?:\.\d+)?)", txn)
+        if debit_match:
+            amount = float(debit_match.group(1).replace(",", ""))
+        elif len(nums) >= 2:
+           
+            if len(nums) == 2:
+                amount = nums[0]  
+            elif len(nums) >= 3:
+                
+                amount = nums[1]  
+                
+    elif "TRANSFER FROM" in txn.upper() or "/CR/" in txn.upper():
         txn_type = "CREDIT"
-        amount = nums[-2] if len(nums) >= 2 else 0.0
+        
+        credit_match = re.search(r"TRANSFER FROM\s+\d+\s+-\s+-\s+(\d+(?:,\d+)*(?:\.\d+)?)", txn)
+        if credit_match:
+            amount = float(credit_match.group(1).replace(",", ""))
+        elif len(nums) >= 2:
+            if len(nums) == 2:
+                amount = nums[0]  
+            elif len(nums) >= 3:
+                amount = nums[1] 
 
-    # UTR
-    utr_match = re.search(r"(?:/CR/|/DR/|UTR\s*No[:\s]*)(\d{6,})", txn)
-    utr = utr_match.group(1) if utr_match else None
-
+    
+    utr = None
+    utr_patterns = [
+        r"(?:/CR/|/DR/)(\d{6,})",  
+        r"TRANSFER (?:FROM|TO)\s+(\d{10,})",  
+        r"\b(\d{12,})\b",  
+        r"Ref No[\.:]*\s*(\d{6,})"  
+    ]
+    
+    for pattern in utr_patterns:
+        match = re.search(pattern, txn)
+        if match:
+            utr = match.group(1)
+            break
+    
+    
     desc = extract_description(txn)
-
-    return {
+    
+    
+    result = {
+        "amount": round(amount, 2),
+        "type": txn_type,
         "date": date.strftime("%d-%b-%Y") if date is not None else None,
         "description": desc,
-        "type": txn_type,
-        "amount": round(amount, 2),
         "category": categorize(desc, txn_type),
-        "UTR_No": utr
+        "utr": utr  
     }
+    
+    return result
 
-# -------------------------
-# API Endpoint
-# -------------------------
 
 @app.post("/upload")
 async def parse_pdf(
     file: UploadFile = File(...),
     password: str = Form(...)
 ):
-    # Save PDF temporarily
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(await file.read())
         pdf_path = tmp.name
@@ -124,24 +189,25 @@ async def parse_pdf(
                 text = page.extract_text()
                 if text:
                     lines.extend(text.split("\n"))
-    except Exception:
+    except Exception as e:
         os.unlink(pdf_path)
-        return {"error": "Invalid PDF or password"}
+        return {"error": f"Invalid PDF or password: {str(e)}"}
 
-    # Remove header
-    start = next(
-        (i for i, l in enumerate(lines) if re.search(r"Date\s+Details\s+Ref\s+No", l, re.I)),
-        None
-    )
-    if start:
+    start = None
+    for i, line in enumerate(lines):
+        if re.search(r"Date\s+Details\s+Ref\s+No", line, re.I):
+            start = i
+            break
+    
+    if start is not None:
         lines = lines[start + 1:]
 
-    # Clean lines
     footer_phrases = [
         "please do not share your atm",
         "bank never ask for such information",
         "computer generated statement",
-        "does not require a signature"
+        "does not require a signature",
+        "balance as on"
     ]
 
     clean_lines = []
@@ -155,8 +221,18 @@ async def parse_pdf(
             break
         clean_lines.append(line)
 
+    
+   
     grouped = group_transactions(clean_lines)
-    result = [parse_transaction(txn) for txn in grouped]
-
+   
+   
+    result = []
+    for txn in grouped:
+        parsed = parse_transaction(txn)
+        if parsed["amount"] > 0:  
+            result.append(parsed)
+    
     os.unlink(pdf_path)
-    return result[1:]
+    
+   
+    return result
